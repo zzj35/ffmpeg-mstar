@@ -18,13 +18,11 @@ echo "cflags = ${cflags}"
 ldflags+=" -L${alkaid_path}/project/release/nvr/i2m/common/glibc/8.2.1/mi_libs/dynamic"
 ldflags+=" -L./../3rdparty/lib/8.2.1"
 echo "ldflags = ${ldflags}"
+# --enable-openssl \
 
 ./configure \
 --prefix=host \
---disable-ffmpeg \
 --disable-ffprobe \
---disable-ffplay \
---disable-programs \
 --disable-symver \
 --disable-doc \
 --disable-htmlpages \
@@ -32,8 +30,6 @@ echo "ldflags = ${ldflags}"
 --disable-podpages \
 --disable-txtpages \
 --disable-avresample \
---disable-avfilter \
---disable-avdevice \
 --disable-postproc \
 --enable-swscale \
 --enable-swresample \
@@ -47,7 +43,6 @@ echo "ldflags = ${ldflags}"
 --enable-shared \
 --disable-gpl \
 --enable-nonfree \
---enable-openssl \
 --enable-pthreads \
 --enable-error-resilience \
 --enable-debug \
@@ -65,3 +60,5 @@ echo "ldflags = ${ldflags}"
 --pkg-config=pkg-config \
 --extra-cflags="${cflags} -g -rdynamic -funwind-tables -ffunction-sections" \
 --extra-ldflags="${ldflags}"
+
+echo "EXTRALIBS += -L${alkaid_path}/project/release/nvr/i2m/common/glibc/8.2.1/mi_libs/dynamic -lmi_vdec -lmi_sys -lmi_common -lmi_disp -lmi_panel -lmi_gfx" >> ffbuild/config.mak

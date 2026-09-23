@@ -75,7 +75,7 @@ FFMPEG_LIB += -lavformat -lavcodec -lavutil -lswscale -lswresample
 
 APP_LIB    += -lssplayer
 APP_LIB    += $(FFMPEG_LIB) $(SDK_LIB)
-APP_LIB    += -lssl -lcrypto
+#APP_LIB    += -lssl -lcrypto
 
 .PHONY: prepare all finish
 

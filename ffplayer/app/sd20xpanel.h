@@ -7,6 +7,7 @@
 #include "mi_ao.h"
 
 #define  DISPLAY_1024_600   1
+//#define  DISPLAY_800_480   1
 
 #ifdef SUPPORT_HDMI
 #include "mi_hdmi.h"
@@ -19,6 +20,11 @@
 #if DISPLAY_1024_600
 #define  PANEL_MAX_W        1024
 #define  PANEL_MAX_H        600
+#endif
+
+#if DISPLAY_800_480
+#define  PANEL_MAX_W        800
+#define  PANEL_MAX_H        480
 #endif
 
 #endif

@@ -92,6 +92,7 @@ static pthread_mutex_t player_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool audio_mute = false;
 static struct timeval time_start, time_end;
 static int64_t time0, time1;
+static bool g_ao_inited = false;
 
 //定义全局变量
 player_opts_t g_opts = {0, 0, AV_SCREEN_MODE, AV_ROTATE_NONE, AUDIO_DEV, 0, 0, "2088960", AV_ONCE};
@@ -108,10 +109,23 @@ static int mm_audio_init(void *args)
     MI_S32 s32GetVolumeDb;
 
     player_stat_t *is = (player_stat_t *)args;
+	
+	 if (g_ao_inited) {
+        av_log(NULL, AV_LOG_INFO, "mm_audio_init: already inited, clear buf only\n");
+        MI_AO_ClearChnBuf(AoDevId, AoChn);
+        return g_opts.audio_layout;
+    }
+
 
     //system("echo 12 > /sys/class/gpio/export");
     //system("echo out > /sys/class/gpio/gpio12/direction");
     //system("echo 1 > /sys/class/gpio/gpio12/value");
+	
+	/* 每次打开前强制关闭 AO，确保驱动状态干净，防止第二次打开时通道无法重建 */
+//    MI_AO_DisableChn(AoDevId, AoChn);
+//    MI_AO_Disable(AoDevId);
+//    usleep(200 * 1000);
+
 
     //set Ao Attr struct
     memset(&stSetAttr, 0, sizeof(MI_AUDIO_Attr_t));
@@ -172,24 +186,39 @@ static int mm_audio_init(void *args)
     MI_AO_GetVolume(AoDevId, &s32GetVolumeDb);
 #endif
     av_log(NULL, AV_LOG_INFO, "mm_audio_init dev[%d] done!\n", AoDevId);
-
+g_ao_inited = true;   // ← 加这行
     return g_opts.audio_layout;
 }
 
 static int mm_audio_deinit(void *args)
 {
-    MI_AUDIO_DEV AoDevId = g_opts.audio_dev;
-    MI_AO_CHN AoChn = AUDIO_CHN;
+ //   MI_AUDIO_DEV AoDevId = g_opts.audio_dev;
+ //   MI_AO_CHN AoChn = AUDIO_CHN;
 
     //system("echo 0 > /sys/class/gpio/gpio12/value");
 
+  //  MI_AO_ClearChnBuf(AoDevId, AoChn);
+	
     /* disable ao channel of */
-    MI_AO_DisableChn(AoDevId, AoChn);
+    //MI_AO_DisableChn(AoDevId, AoChn);
 
     /* disable ao device */
-    MI_AO_Disable(AoDevId);
+    //MI_AO_Disable(AoDevId);
 
+    av_log(NULL, AV_LOG_INFO, "mm_audio_deinit: skip, keep AO on\n");
     return MI_SUCCESS;
+}
+
+int mm_player_reopen(const char *newfile)
+{
+    if (!g_mmplayer) {
+        av_log(NULL, AV_LOG_ERROR, "mm_player_reopen: player not open\n");
+        return -1;
+    }
+    pthread_mutex_lock(&player_mutex);
+    int ret = player_reopen(g_mmplayer, newfile);
+    pthread_mutex_unlock(&player_mutex);
+    return ret;
 }
 
 static int mm_audio_pause(void)

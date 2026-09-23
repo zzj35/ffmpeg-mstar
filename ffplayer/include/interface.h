@@ -8,6 +8,7 @@ extern "C"{
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+int mm_player_reopen(const char *newfile);
 
 /**
  * Open file or url and set the windows size

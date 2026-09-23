@@ -413,3 +413,89 @@ int player_deinit(player_stat_t *is)
     return 0;
 }
 
+/* 停止所有线程，但不释放 player_stat_t 本身 */
+static void player_threads_stop(player_stat_t *is)
+{
+    is->abort_request = 1;
+
+    if (true == is->demux_status) {
+        if (is->read_tid != 0) pthread_join(is->read_tid, NULL);
+        is->read_tid = 0;
+        is->demux_status = false;
+    }
+}
+
+/* 释放资源和 ffmpeg context，但不碰 AO */
+static void player_resources_free(player_stat_t *is)
+{
+    /* 走官方关闭路径，比手写 avcodec_free_context 更稳，能正确释放 vdec handle */
+    if (is->video_idx >= 0) {
+        stream_component_close(is, is->video_idx);
+    }
+    if (is->audio_idx >= 0) {
+        stream_component_close(is, is->audio_idx);
+    }
+
+    packet_queue_flush(&is->video_pkt_queue);
+    packet_queue_flush(&is->audio_pkt_queue);
+    is->video_pkt_queue.abort_request = 0;
+    is->audio_pkt_queue.abort_request = 0;
+    frame_queue_flush(&is->video_frm_queue);
+    frame_queue_flush(&is->audio_frm_queue);
+
+    if (is->p_fmt_ctx) {
+        if (is->p_fmt_ctx->opaque) {
+            av_freep(&is->p_fmt_ctx->opaque);
+            is->p_fmt_ctx->opaque = NULL;
+        }
+        avformat_close_input(&is->p_fmt_ctx);
+        is->p_fmt_ctx = NULL;
+        avformat_network_deinit();
+    }
+    is->p_video_stream = NULL;
+    is->p_audio_stream = NULL;
+}
+
+/* 原地换文件，不销毁播放器，AO 一直开着 */
+int player_reopen(player_stat_t *is, const char *newfile)
+{
+    if (!is || !newfile) return -1;
+
+    av_log(NULL, AV_LOG_WARNING, ">>> player_reopen: %s\n", newfile);
+
+    player_threads_stop(is);
+	
+	av_log(NULL, AV_LOG_WARNING, ">>> player_reopen B: threads stopped\n");
+    player_resources_free(is);
+ av_log(NULL, AV_LOG_WARNING, ">>> player_reopen C: resources freed\n");
+    av_free(is->filename);
+    is->filename = av_strdup(newfile);
+	    av_log(NULL, AV_LOG_WARNING, ">>> player_reopen D: filename = %s\n", is->filename);
+    if (!is->filename) return -1;
+
+    is->abort_request  = 0;
+    is->eof            = 0;
+    is->paused         = 0;
+    is->step           = 0;
+    is->start_play     = false;
+    is->the_last_frame = false;
+    is->keep_frames    = false;
+    is->no_pkt_buf     = 0;
+    is->time_out       = false;
+    is->audio_complete = 1;
+    is->video_complete = 1;
+    is->audio_idx      = -1;
+    is->video_idx      = -1;
+    is->play_status    = 0;
+    is->frame_timer    = 0.0;
+
+    int ret = open_demux(is);
+    if (ret < 0) { av_log(NULL, AV_LOG_ERROR, "reopen demux failed\n"); return -1; }
+    ret = open_video(is);
+    if (ret < 0) { av_log(NULL, AV_LOG_ERROR, "reopen video failed\n"); return -1; }
+    ret = open_audio(is);
+    if (ret < 0) { av_log(NULL, AV_LOG_ERROR, "reopen audio failed\n"); return -1; }
+
+    av_log(NULL, AV_LOG_WARNING, "<<< player_reopen done\n");
+    return 0;
+}

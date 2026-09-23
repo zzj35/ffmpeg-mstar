@@ -10,6 +10,11 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <stdlib.h>
+#include <time.h>
+#include <linux/input.h>
+#include <sys/select.h>
+#include <fcntl.h>
 
 #ifdef CHIP_IS_SS268
 #include "ss268_panel.h"
@@ -24,20 +29,76 @@
 typedef void (*sighandler_t)(int);
 sighandler_t signal(int signum, sighandler_t handler);
 
-/*******************************************************************************************/
+#define MAX_PLAYLIST 128
+#define TOUCH_DEV       "/dev/input/event0"
+#define SWIPE_THRESHOLD 80      // 最小滑动距离(像素)，按屏调
+#define SEEK_STEP       10.0    // 快进快退秒数
+
+static int  g_touch_x = 0, g_touch_y = 0;
+static int  g_start_x = 0, g_start_y = 0;
+static bool g_touching = false;
+static int  g_touch_fd = -1;
+
+static char *playlist[MAX_PLAYLIST];
+static int playlist_count = 0;
+static int current_index = 0;
+static pthread_mutex_t player_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static int width, height;
-static bool b_exit = false;
+static volatile bool b_exit = false;
 static bool player_working = false;
+static double duration, position;
+
+// 全局音量 / 静音状态，切换后能恢复
+static int volumn = 20;
+static bool mute = false;
 
 void signal_handler_fun(int signum) {
     printf("catch signal [%d]\n", signum);
     b_exit = true;
 }
 
+/**
+ * 统一播放函数：和第一次播放完全一样
+ * 设置音频选项 -> 设置视频选项 -> open -> 取时长 -> 设音量
+ */
+static int player_start(int index)
+{
+    if (index < 0 || index >= playlist_count) return -1;
+
+#ifdef SUPPORT_HDMI
+    mm_player_set_opts("audio_device", "", 3);
+    mm_player_set_opts("audio_layout", "", AV_CH_LAYOUT_MONO);
+#else
+    mm_player_set_opts("audio_device", "", 0);
+#endif
+
+    mm_player_set_opts("video_rotate", "", AV_ROTATE_NONE);
+    mm_player_set_opts("video_only", "", 0);
+    mm_player_set_opts("video_ratio", "", AV_SCREEN_MODE);
+    mm_player_set_opts("enable_scaler", "", 0);
+    mm_player_set_opts("resolution", "8294400", 0);
+    mm_player_set_opts("play_mode", "", AV_ONCE);
+
+    int ret = mm_player_open(playlist[index], 0, 0, width, height);
+    if (ret < 0) {
+        printf("open %s failed\n", playlist[index]);
+        return -1;
+    }
+
+    mm_player_getduration(&duration);
+
+    mm_player_set_volumn(volumn);
+    if (mute) mm_player_set_mute(true);
+
+    printf("try playing %s ...\n", playlist[index]);
+    return 0;
+}
+
 static void * mm_player_thread(void *args)
 {
     int ret;
-    char *filename = (char *)args;
+    (void)args;
 
     while (!b_exit)
     {
@@ -57,22 +118,30 @@ static void * mm_player_thread(void *args)
 
         if (ret & AV_PLAY_ERROR)
         {
+            pthread_mutex_lock(&player_mutex);
             mm_player_close();
+            pthread_mutex_unlock(&player_mutex);
             b_exit = true;
         }
         else if (ret & AV_PLAY_LOOP)
         {
+            // 单曲循环，什么都不做
         }
         else if ((ret & AV_PLAY_COMPLETE) == AV_PLAY_COMPLETE)
         {
             player_working = false;
+            pthread_mutex_lock(&player_mutex);
             mm_player_close();
-            ret = mm_player_open(filename, 0, 0, width, height);
-            if (ret < 0)
-            {
+            pthread_mutex_unlock(&player_mutex);
+            usleep(800 * 1000);
+            current_index = (current_index + 1) % playlist_count;
+            ret = player_start(current_index);
+            if (ret < 0) {
                 b_exit = true;
+            } else {
+                player_working = true;
             }
-            player_working = true;
+            pthread_mutex_unlock(&player_mutex);
         }
         av_usleep(50 * 1000);
     }
@@ -80,85 +149,197 @@ static void * mm_player_thread(void *args)
     return NULL;
 }
 
+static void *touch_thread(void *arg)
+{
+    (void)arg;
+    struct input_event ev;
+
+    g_touch_fd = open(TOUCH_DEV, O_RDONLY);
+    if (g_touch_fd < 0) {
+        printf("open %s failed\n", TOUCH_DEV);
+        return NULL;
+    }
+    printf("touch thread start\n");
+
+    while (!b_exit) {
+        fd_set fds;
+        struct timeval tv = {0, 100000};   // 100ms
+        FD_ZERO(&fds);
+        FD_SET(g_touch_fd, &fds);
+
+        int ret = select(g_touch_fd + 1, &fds, NULL, NULL, &tv);
+        if (ret <= 0) continue;
+
+        if (read(g_touch_fd, &ev, sizeof(ev)) != sizeof(ev)) continue;
+
+        if (ev.type == EV_ABS) {
+            if (ev.code == ABS_MT_POSITION_X || ev.code == ABS_X)
+                g_touch_x = ev.value;
+            else if (ev.code == ABS_MT_POSITION_Y || ev.code == ABS_Y)
+                g_touch_y = ev.value;
+        }
+        else if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
+            if (ev.value == 1) {
+                g_touching = true;
+                g_start_x = g_touch_x;
+                g_start_y = g_touch_y;
+            } else if (ev.value == 0 && g_touching) {
+                g_touching = false;
+                int dx = g_touch_x - g_start_x;
+                int dy = g_touch_y - g_start_y;
+                int adx = dx < 0 ? -dx : dx;
+                int ady = dy < 0 ? -dy : dy;
+
+                // 距离太小视为点击，忽略
+                if (adx < SWIPE_THRESHOLD && ady < SWIPE_THRESHOLD)
+                    continue;
+
+                if (adx > ady) {
+                    // 横向
+                    if (dx > 0) {
+                        printf(">>> swipe right: seek +%.0fs\n", SEEK_STEP);
+                        double pos;
+                        mm_player_getposition(&pos);
+                        pos += SEEK_STEP;
+                        if (pos > duration) pos = duration;
+                        mm_player_seek2time(pos);
+                    } else {
+                        printf(">>> swipe left: seek -%.0fs\n", SEEK_STEP);
+                        double pos;
+                        mm_player_getposition(&pos);
+                        pos -= SEEK_STEP;
+                        if (pos < 0) pos = 0;
+                        mm_player_seek2time(pos);
+                    }
+                } else {
+                    // 纵向
+                    if (dy < 0) {
+                        printf(">>> swipe up: volume +\n");
+                        volumn += 5;
+                        if (volumn > 100) volumn = 100;
+                        mm_player_set_volumn(volumn);
+                    } else {
+                        printf(">>> swipe down: volume -\n");
+                        volumn -= 5;
+                        if (volumn < 0) volumn = 0;
+                        mm_player_set_volumn(volumn);
+                    }
+                }
+            }
+        }
+    }
+
+    close(g_touch_fd);
+    g_touch_fd = -1;
+    return NULL;
+}
+
+static int load_playlist_from_file(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) return -1;
+
+    char line[512];
+    while (fgets(line, sizeof(line), fp) && playlist_count < MAX_PLAYLIST) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (line[0] == '\0' || line[0] == '#') continue;
+        playlist[playlist_count++] = strdup(line);
+    }
+    fclose(fp);
+    return 0;
+}
+
+static bool has_txt_ext(const char *s)
+{
+    size_t len = strlen(s);
+    return len > 4 && strcasecmp(s + len - 4, ".txt") == 0;
+}
+
 int main(int argc, char *argv[])
 {
-    int ret, index = 1;
-    int volumn = 0;
-    bool mute = false, win_down = false;
+    int ret;
+    bool win_down = false;
     char cmd;
-    double duration, position;
     pthread_t mm_thread = NULL;
-    char url[128];
+	pthread_t touch_tid = 0;
     bool disp_flag = false;
 
-    if (!argv[1]) {
-        printf("invalid input format, please retey!\n");
-        printf("such as : ./ssplayer filename\nor: ./ssplayer file1 file2\n");
+    if (argc < 2) {
+        printf("usage:\n");
+        printf("  %s <media_file> [media_file2 ...]\n", argv[0]);
+        printf("  %s <playlist.txt>\n", argv[0]);
         return -1;
     }
 
     printf("welcome to test ssplayer!\n");
-
+    srand(time(NULL));
     signal(SIGINT, signal_handler_fun);
+
+    // 解析播放列表
+    if (has_txt_ext(argv[1])) {
+        if (load_playlist_from_file(argv[1]) < 0) {
+            printf("open playlist %s failed\n", argv[1]);
+            return -1;
+        }
+    } else {
+        for (int i = 1; i < argc && playlist_count < MAX_PLAYLIST; i++) {
+            playlist[playlist_count++] = strdup(argv[i]);
+        }
+    }
+
+    if (playlist_count == 0) {
+        printf("empty playlist\n");
+        return -1;
+    }
+    current_index = 0;
 
 #ifdef CHIP_IS_SS268
     ss268_sys_init();
     ss268_screen_init();
     #ifdef SUPPORT_HDMI
     mm_player_set_opts("audio_device", "", 4);
-    mm_player_set_opts("audio_layout", "", AV_CH_LAYOUT_STEREO);//keep the same with hdmi init
+    mm_player_set_opts("audio_layout", "", AV_CH_LAYOUT_STEREO);
     #else
     mm_player_set_opts("audio_device", "", 0);
     #endif
-
     ss268_getpanel_wh(&width, &height);
 #elif defined CHIP_IS_SS22X
     ss22x_sys_init();
     ss22x_screen_init();
     #ifdef SUPPORT_HDMI
     mm_player_set_opts("audio_device", "", 4);
-    mm_player_set_opts("audio_layout", "", AV_CH_LAYOUT_STEREO);//keep the same with hdmi init
+    mm_player_set_opts("audio_layout", "", AV_CH_LAYOUT_STEREO);
     #else
     mm_player_set_opts("audio_device", "", 0);
     #endif
-
     ss22x_getpanel_wh(&width, &height);
 #else
     sd20x_sys_init();
-
     #ifdef SUPPORT_HDMI
     sd20x_panel_init(E_MI_DISP_INTF_HDMI, 0);
     mm_player_set_opts("audio_device", "", 3);
-    mm_player_set_opts("audio_layout", "", AV_CH_LAYOUT_MONO);//keep the same with hdmi init
+    mm_player_set_opts("audio_layout", "", AV_CH_LAYOUT_MONO);
     #else
     sd20x_panel_init(E_MI_DISP_INTF_LCD, 0);
     mm_player_set_opts("audio_device", "", 0);
     #endif
-
     ssd20x_getpanel_wh(&width, &height);
 #endif
 
-    printf("try playing %s ...\n", argv[1]);
-
-    mm_player_set_opts("video_rotate", "", AV_ROTATE_NONE);
-    mm_player_set_opts("video_only", "", 0);
-    mm_player_set_opts("video_ratio", "", AV_SCREEN_MODE);
-    mm_player_set_opts("enable_scaler", "", 0);
-    mm_player_set_opts("resolution", "8294400", 0);
-    mm_player_set_opts("play_mode", "", AV_LOOP);
-
-    ret = mm_player_open(argv[1], 0, 0, width, height);
+    // 第一次播放，走统一函数
+    ret = player_start(current_index);
     if (ret < 0) {
         goto exit;
     }
-    mm_player_getduration(&duration);
     player_working = true;
 
-    memset(url, '\0', sizeof(url));
-    strncpy(url, argv[1], strlen(argv[1]));
-    ret = pthread_create(&mm_thread, NULL, mm_player_thread, (void *)url);
+    ret = pthread_create(&mm_thread, NULL, mm_player_thread, NULL);
     if (ret != 0) {
         goto exit;
+    }
+	ret = pthread_create(&touch_tid, NULL, touch_thread, NULL);
+    if (ret != 0) {
+        printf("touch_thread create failed\n");
     }
 
     b_exit = false;
@@ -169,115 +350,146 @@ int main(int argc, char *argv[])
         switch (cmd)
         {
             case 's':
-                mm_player_open(url, 0, 0, width, height);
+                pthread_mutex_lock(&player_mutex);
+                player_start(current_index);
                 player_working = true;
-            break;
+                pthread_mutex_unlock(&player_mutex);
+                break;
 
             case 't':
                 player_working = false;
+                pthread_mutex_lock(&player_mutex);
                 mm_player_close();
-            break;
+                pthread_mutex_unlock(&player_mutex);
+                break;
 
             case 'f':
                 mm_player_getposition(&position);
                 position += 5.0;
                 position = (position >= duration) ? duration : position;
                 mm_player_seek2time(position);
-            break;
+                break;
 
-            case 'b':
+            case 'v':   // 后退 5 秒
                 mm_player_getposition(&position);
                 position -= 5.0;
                 position = (position <= 0) ? 0 : position;
                 mm_player_seek2time(position);
-            break;
+                break;
 
             case 'u':
                 mm_player_resume();
-            break;
+                break;
 
             case 'p':
                 mm_player_pause();
-            break;
+                break;
 
-            case 'g': {
+            case 'g':
                 mm_player_getduration(&duration);
-            }
-            break;
+                break;
 
-            case 'd': {
+            case 'd':
                 mm_player_getposition(&position);
-                printf("play %s in [%.3f]\n", argv[1], position);
-            }
-            break;
+                printf("play %s in [%.3f]\n", playlist[current_index], position);
+                break;
 
             case 'm':
                 mute = !mute;
                 mm_player_set_mute(mute);
                 printf("audio mute status: %d\n", mm_player_get_status());
-            break;
+                break;
 
             case '+':
                 volumn += 5;
-                volumn  = (volumn > 100) ? 100 : volumn;
+                volumn = (volumn > 100) ? 100 : volumn;
                 mm_player_set_volumn(volumn);
-            break;
+                break;
 
             case '-':
                 volumn -= 5;
-                volumn  = (volumn < 0) ? 0 : volumn;
+                volumn = (volumn < 0) ? 0 : volumn;
                 mm_player_set_volumn(volumn);
-            break;
+                break;
 
             case 'w':
-                if (!win_down)
-                {
+                if (!win_down) {
                     mm_player_set_window(0, 0, width / 2, height / 2);
                     win_down = true;
-                }
-                else
-                {
+                } else {
                     mm_player_set_window(0, 0, width, height);
                     win_down = false;
+                }
+                break;
+
+            case 'n':
+                if (playlist_count > 1) {
+                    player_working = false;
+                    pthread_mutex_lock(&player_mutex);
+                    mm_player_close();
+                    pthread_mutex_unlock(&player_mutex);
+                    usleep(800 * 1000);
+                    current_index = (current_index + 1) % playlist_count;
+                    ret = player_start(current_index);
+                    if (ret < 0) {
+                        b_exit = true;
+                    } else {
+                        player_working = true;
+                    }
+                }
+            break;
+
+            case 'b':
+                if (playlist_count > 1) {
+                    player_working = false;
+                    pthread_mutex_lock(&player_mutex);
+                    mm_player_close();
+                    pthread_mutex_unlock(&player_mutex);
+                    usleep(800 * 1000);
+                    current_index = (current_index - 1 + playlist_count) % playlist_count;
+                    ret = player_start(current_index);
+                    if (ret < 0) {
+                        b_exit = true;
+                    } else {
+                        player_working = true;
+                    }
                 }
             break;
 
             case 'r':
-                if (argv[2] && player_working)
-                {
+                if (playlist_count > 1) {
                     player_working = false;
+                    pthread_mutex_lock(&player_mutex);
                     mm_player_close();
-                    if (index == 1)
-                    {
-                        memset(url, '\0', sizeof(url));
-                        strncpy(url, argv[2], strlen(argv[2]));
-                        index ++;
-                    }
-                    else if (index == 2)
-                    {
-                        memset(url, '\0', sizeof(url));
-                        strncpy(url, argv[1], strlen(argv[1]));
-                        index =1;
-                    }
-                    ret = mm_player_open(url, 0, 0, width, height);
-                    if (ret < 0)
-                    {
+                    pthread_mutex_unlock(&player_mutex);
+                    usleep(800 * 1000);
+                    current_index = rand() % playlist_count;
+                    ret = player_start(current_index);
+                    if (ret < 0) {
                         b_exit = true;
+                    } else {
+                        player_working = true;
                     }
-                    player_working = true;
                 }
             break;
 
             case 'c':
                 disp_flag = !disp_flag;
                 mm_player_flush_screen(disp_flag);
-            break;
+                break;
 
             case 'q':
+                player_working = false;
+                pthread_mutex_lock(&player_mutex);
+                mm_player_close();
+                pthread_mutex_unlock(&player_mutex);
                 b_exit = true;
-            break;
-
-            default : break;
+                break;
+            case 'R':
+                system("reboot");
+                break;
+            default:
+                break;
         }
         fflush(stdout);
         cmd = '\0';
@@ -285,9 +497,16 @@ int main(int argc, char *argv[])
 
     if (mm_thread)
         pthread_join(mm_thread, NULL);
+	if (touch_tid)
+        pthread_join(touch_tid, NULL);
 
 exit:
-    mm_player_close();
+    if (player_working) {
+        player_working = false;
+        pthread_mutex_lock(&player_mutex);
+        mm_player_close();
+        pthread_mutex_unlock(&player_mutex);
+    }
 
 #ifdef CHIP_IS_SS268
     ss268_screen_deinit();
@@ -303,8 +522,5 @@ exit:
     #endif
     sd20x_sys_deinit();
 #endif
-
     return 0;
 }
-
-

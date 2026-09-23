@@ -1,4 +1,19 @@
 # ffmpeg
+	forked from aaron201912/ffmpeg
+# ffplayer	
+	本项目基于 aaron201912/ffmpeg 二开
+
+	增加屏参 EP7009BEDCT_1024x600.h（京东方B4-TV070WS5）
+	增加屏参 NTW700T50D004B_1024x600.h
+	增加屏参 NTW430T40X005A_800x480.h
+	增加txt播放列表支持（支持切换下一个）
+	增加触摸上滑下滑音量调节，左滑右画快进快退
+	
+	SSD202D mmaheapsz=0x3000000 下实测最高2048x1152分辨率硬解H264,H265 
+	
+	BUG:退出播放内核日志频繁刷 [MI_SYS]Free Resource Process 1, c3af9c800000000d 
+		<<<MI_SYS_IMPL_ChnGetBufHandleType[6669] pid error -1079665155,931  暂未解决
+	
 ## DownLoad
     git clone https://github.com/aaron201912/ffmpeg.git 
 

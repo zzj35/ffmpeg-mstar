@@ -27,7 +27,12 @@ static MI_S32 Hdmi_callback_impl(MI_HDMI_DeviceId_e eHdmi, MI_HDMI_EventType_e E
 #else
 
 #if DISPLAY_1024_600
-#include "SAT070CP50_1024x600.h"
+//#include "NTW700T50D004B_1024x600.h"
+#include "EP7009BEDCT_1024x600.h"
+#endif
+
+#if DISPLAY_800_480
+#include "NTW430T40X005A_800x480.h"
 #endif
 
 #endif

@@ -485,15 +485,27 @@ static int demux_init(player_stat_t *is)
     }
 
     /*reset file pos to the beginning, by raines*/
-    ret = avformat_seek_file(p_fmt_ctx, v_idx, INT64_MIN, 0, INT64_MAX, AVSEEK_FLAG_BACKWARD);
-    if (ret != 0) {
-        av_log(NULL, AV_LOG_ERROR, "avformat_seek_file failed!\n");
-        ret = -1;
-        goto fail;
-    }
-    else
-    {
+//    ret = avformat_seek_file(p_fmt_ctx, v_idx, INT64_MIN, 0, INT64_MAX, AVSEEK_FLAG_BACKWARD);
+//    if (ret != 0) {
+//        av_log(NULL, AV_LOG_ERROR, "avformat_seek_file failed!\n");
+//        ret = -1;
+//        goto fail;
+//    }
+//    else
+//    {
+//        av_log(NULL, AV_LOG_INFO, "avformat_seek_file success!\n");
+//    }
+	/* 点播文件（有 duration）seek 到开头；直播流（duration 无效）不 seek */
+    if (p_fmt_ctx->duration != AV_NOPTS_VALUE && p_fmt_ctx->duration > 0) {
+        ret = avformat_seek_file(p_fmt_ctx, v_idx, INT64_MIN, 0, INT64_MAX, AVSEEK_FLAG_BACKWARD);
+        if (ret != 0) {
+            av_log(NULL, AV_LOG_ERROR, "avformat_seek_file failed (%d)\n", ret);
+            ret = -1;
+            goto fail;
+        }
         av_log(NULL, AV_LOG_INFO, "avformat_seek_file success!\n");
+    } else {
+        av_log(NULL, AV_LOG_INFO, "live stream (duration is N/A), skip seek to beginning\n");
     }
 
     prctl(PR_SET_NAME, "demux_read");
