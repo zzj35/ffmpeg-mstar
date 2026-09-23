@@ -1,7 +1,7 @@
 # ffmpeg
 	forked from aaron201912/ffmpeg
 # ffplayer	
-	本项目基于 aaron201912/ffmpeg 二开
+	本项目基于 aaron201912/ffmpeg 二开（面向AI编程）
 
 	增加屏参 EP7009BEDCT_1024x600.h（京东方B4-TV070WS5）
 	增加屏参 NTW700T50D004B_1024x600.h
