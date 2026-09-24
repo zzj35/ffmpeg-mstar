@@ -10,6 +10,7 @@ typedef enum {
     OSD_ICON_PLAY,
     OSD_ICON_PAUSE,
 } osd_icon_e;
+typedef void (*osd_gettime_cb_t)(int *cur_sec, int *total_sec);
 
 int  osd_init(void);
 void osd_deinit(void);
@@ -36,4 +37,5 @@ bool   osd_is_visible(void);
 void   osd_lock(void);
 void   osd_unlock(void);
 
+void  osd_set_gettime_cb(osd_gettime_cb_t cb);
 #endif
