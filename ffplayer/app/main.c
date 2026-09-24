@@ -26,6 +26,12 @@
 #include "player.h"
 #include "interface.h"
 
+#include "osd.h"
+#include <linux/input.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#include <math.h>
+
 typedef void (*sighandler_t)(int);
 sighandler_t signal(int signum, sighandler_t handler);
 
@@ -33,6 +39,8 @@ sighandler_t signal(int signum, sighandler_t handler);
 #define TOUCH_DEV       "/dev/input/event0"
 #define SWIPE_THRESHOLD 80      // 最小滑动距离(像素)，按屏调
 #define SEEK_STEP       10.0    // 快进快退秒数
+#define DOUBLE_CLICK_MS  300
+#define LONG_PRESS_MS    500
 
 static int  g_touch_x = 0, g_touch_y = 0;
 static int  g_start_x = 0, g_start_y = 0;
@@ -149,88 +157,144 @@ static void * mm_player_thread(void *args)
     return NULL;
 }
 
+static int64_t touch_now_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
 static void *touch_thread(void *arg)
 {
     (void)arg;
     struct input_event ev;
-
-    g_touch_fd = open(TOUCH_DEV, O_RDONLY);
-    if (g_touch_fd < 0) {
-        printf("open %s failed\n", TOUCH_DEV);
-        return NULL;
-    }
-    printf("touch thread start\n");
+    int tx = 0, ty = 0;
+    int sx = 0, sy = 0;
+    int touching = 0, dragging = 0;
+    int64_t last_click_ms = 0;
+    int fd = open(TOUCH_DEV, O_RDONLY);
+    if (fd < 0) { printf("open %s failed\n", TOUCH_DEV); return NULL; }
+    printf("touch_thread started\n");
 
     while (!b_exit) {
         fd_set fds;
-        struct timeval tv = {0, 100000};   // 100ms
+        struct timeval tv = {0, 100000};
         FD_ZERO(&fds);
-        FD_SET(g_touch_fd, &fds);
-
-        int ret = select(g_touch_fd + 1, &fds, NULL, NULL, &tv);
-        if (ret <= 0) continue;
-
-        if (read(g_touch_fd, &ev, sizeof(ev)) != sizeof(ev)) continue;
+        FD_SET(fd, &fds);
+        if (select(fd + 1, &fds, NULL, NULL, &tv) <= 0) continue;
+        if (read(fd, &ev, sizeof(ev)) != sizeof(ev)) continue;
 
         if (ev.type == EV_ABS) {
-            if (ev.code == ABS_MT_POSITION_X || ev.code == ABS_X)
-                g_touch_x = ev.value;
-            else if (ev.code == ABS_MT_POSITION_Y || ev.code == ABS_Y)
-                g_touch_y = ev.value;
+            if (ev.code == ABS_MT_POSITION_X || ev.code == ABS_X) tx = ev.value;
+            else if (ev.code == ABS_MT_POSITION_Y || ev.code == ABS_Y) ty = ev.value;
+
+            if (dragging) {
+                int pct  = osd_get_progress_from_x(tx);
+                int secs = (int)(duration * pct / 100.0);
+                osd_show_progress(pct, 1500);
+                osd_show_time(secs, (int)duration, 1500);
+            }
         }
         else if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
             if (ev.value == 1) {
-                g_touching = true;
-                g_start_x = g_touch_x;
-                g_start_y = g_touch_y;
-            } else if (ev.value == 0 && g_touching) {
-                g_touching = false;
-                int dx = g_touch_x - g_start_x;
-                int dy = g_touch_y - g_start_y;
+                touching = 1;
+                dragging = 0;
+                sx = tx; sy = ty;
+                osd_clear_all();
+
+                /* 按下时立即判断是否在进度条区域，不等 ABS */
+                if (osd_is_touch_in_progress_area(tx, ty)) {
+                    dragging = 1;
+                    int pct = osd_get_progress_from_x(tx);
+                    int secs = (int)(duration * pct / 100.0);
+                    osd_show_progress(pct, 1500);
+                    osd_show_time(secs, (int)duration, 1500);
+                }
+            }
+            else if (ev.value == 0 && touching) {
+                touching = 0;
+                int dx  = tx - sx;
+                int dy  = ty - sy;
                 int adx = dx < 0 ? -dx : dx;
                 int ady = dy < 0 ? -dy : dy;
 
-                // 距离太小视为点击，忽略
-                if (adx < SWIPE_THRESHOLD && ady < SWIPE_THRESHOLD)
+                /* 拖拽结束：seek 到目标 */
+                if (dragging) {
+                    int pct = osd_get_progress_from_x(tx);
+                    double target = duration * pct / 100.0;
+                    mm_player_seek2time(target);
+                    osd_show_progress(pct, 1500);
+                    osd_show_time((int)target, (int)duration, 1500);
+                    dragging = 0;
                     continue;
+                }
 
-                if (adx > ady) {
-                    // 横向
-                    if (dx > 0) {
-                        printf(">>> swipe right: seek +%.0fs\n", SEEK_STEP);
+                /* 点击 */
+                if (adx < SWIPE_THRESHOLD && ady < SWIPE_THRESHOLD) {
+                    if (last_click_ms > 0 &&
+                        touch_now_ms() - last_click_ms < DOUBLE_CLICK_MS) {
+                        /* 双击：暂停 / 播放，图标 + 文字 */
+                        if (g_mmplayer && g_mmplayer->paused) {
+                            mm_player_resume();
+                            osd_show_icon(OSD_ICON_PLAY, 1500);
+                            osd_show_left("PLAY", 1500);
+                        } else {
+                            mm_player_pause();
+                            osd_show_icon(OSD_ICON_PAUSE, 1500);
+                            osd_show_left("PAUSE", 1500);
+                        }
+                        last_click_ms = 0;
+                    } else {
+                        /* 单击：进度 + 时间 + 当前播放状态图标 */
                         double pos;
                         mm_player_getposition(&pos);
+                        if (duration > 0.1) {
+                            int pct = (int)(pos * 100 / duration);
+                            osd_show_progress(pct, 3000);
+                            osd_show_time((int)pos, (int)duration, 3000);
+                            if (g_mmplayer && g_mmplayer->paused) {
+                                osd_show_icon(OSD_ICON_PAUSE, 3000);
+                                osd_show_left("PAUSE", 3000);
+                            } else {
+                                osd_show_icon(OSD_ICON_PLAY, 3000);
+                                osd_show_left("PLAY", 3000);
+                            }
+                        }
+                        last_click_ms = touch_now_ms();
+                    }
+                }
+                /* 横向：快进快退，同步更新进度条 */
+                else if (adx > ady) {
+                    double pos;
+                    mm_player_getposition(&pos);
+                    char buf[16];
+                    if (dx > 0) {
                         pos += SEEK_STEP;
                         if (pos > duration) pos = duration;
                         mm_player_seek2time(pos);
+                        snprintf(buf, sizeof(buf), ">> %ds", (int)SEEK_STEP);
                     } else {
-                        printf(">>> swipe left: seek -%.0fs\n", SEEK_STEP);
-                        double pos;
-                        mm_player_getposition(&pos);
                         pos -= SEEK_STEP;
                         if (pos < 0) pos = 0;
                         mm_player_seek2time(pos);
+                        snprintf(buf, sizeof(buf), "<< %ds", (int)SEEK_STEP);
                     }
-                } else {
-                    // 纵向
-                    if (dy < 0) {
-                        printf(">>> swipe up: volume +\n");
-                        volumn += 5;
-                        if (volumn > 100) volumn = 100;
-                        mm_player_set_volumn(volumn);
-                    } else {
-                        printf(">>> swipe down: volume -\n");
-                        volumn -= 5;
-                        if (volumn < 0) volumn = 0;
-                        mm_player_set_volumn(volumn);
-                    }
+                    int pct = (duration > 0.1) ? (int)(pos * 100 / duration) : 0;
+                    osd_show_left(buf, 1500);
+                    osd_show_progress(pct, 1500);
+                    osd_show_time((int)pos, (int)duration, 1500);
+                }
+                /* 纵向：音量，只更新中间，保留进度条和时间 */
+                else {
+                    if (dy < 0) { volumn += 5; if (volumn > 100) volumn = 100; }
+                    else        { volumn -= 5; if (volumn < 0) volumn = 0; }
+                    mm_player_set_volumn(volumn);
+                    osd_show_volume(volumn, 1500);
                 }
             }
         }
     }
-
-    close(g_touch_fd);
-    g_touch_fd = -1;
+    close(fd);
     return NULL;
 }
 
@@ -337,6 +401,14 @@ int main(int argc, char *argv[])
     if (ret != 0) {
         goto exit;
     }
+
+    /* OSD 初始化 */
+    if (osd_init() != 0) {
+        printf("osd_init failed\n");
+    } else {
+        osd_start();
+    }
+
 	ret = pthread_create(&touch_tid, NULL, touch_thread, NULL);
     if (ret != 0) {
         printf("touch_thread create failed\n");
@@ -499,6 +571,8 @@ int main(int argc, char *argv[])
         pthread_join(mm_thread, NULL);
 	if (touch_tid)
         pthread_join(touch_tid, NULL);
+    osd_stop();
+    osd_deinit();    
 
 exit:
     if (player_working) {

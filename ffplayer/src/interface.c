@@ -18,6 +18,7 @@
 #include "mi_gfx.h"
 #include "mi_ao.h"
 #include "mi_vdec_extra.h"
+#include "osd.h"
 
 #ifdef ST_DEFAULT_SOC_ID
 #undef ST_DEFAULT_SOC_ID
@@ -63,12 +64,9 @@
 #define AUDIO_OUTPUT_SAMPFMT        E_MI_AUDIO_BIT_WIDTH_16
 
 #define MI_AUDIO_SAMPLE_PER_FRAME   2048
-
 #define MI_AUDIO_MAX_DATA_SIZE      25000
-
 #define MI_AUDIO_MAX_SAMPLES_PER_FRAME     2048
 #define MI_AUDIO_MAX_FRAME_NUM             6
-
 #define MI_AO_PCM_BUF_SIZE_BYTE     (MI_AUDIO_MAX_SAMPLES_PER_FRAME * MI_AUDIO_MAX_FRAME_NUM * 2 * 4)
 
 #define MAKE_YUYV_VALUE(y,u,v) ((y) << 24) | ((u) << 16) | ((y) << 8) | (v)
@@ -94,7 +92,6 @@ static struct timeval time_start, time_end;
 static int64_t time0, time1;
 static bool g_ao_inited = false;
 
-//定义全局变量
 player_opts_t g_opts = {0, 0, AV_SCREEN_MODE, AV_ROTATE_NONE, AUDIO_DEV, 0, 0, "2088960", AV_ONCE};
 player_stat_t *g_mmplayer = NULL;
 
@@ -104,30 +101,16 @@ static int mm_audio_init(void *args)
     MI_AUDIO_Attr_t stGetAttr;
     MI_AUDIO_DEV AoDevId = g_opts.audio_dev;
     MI_AO_CHN AoChn = AUDIO_CHN;
-
     MI_S32 s32SetVolumeDb;
     MI_S32 s32GetVolumeDb;
-
     player_stat_t *is = (player_stat_t *)args;
-	
-	 if (g_ao_inited) {
+
+    if (g_ao_inited) {
         av_log(NULL, AV_LOG_INFO, "mm_audio_init: already inited, clear buf only\n");
         MI_AO_ClearChnBuf(AoDevId, AoChn);
         return g_opts.audio_layout;
     }
 
-
-    //system("echo 12 > /sys/class/gpio/export");
-    //system("echo out > /sys/class/gpio/gpio12/direction");
-    //system("echo 1 > /sys/class/gpio/gpio12/value");
-	
-	/* 每次打开前强制关闭 AO，确保驱动状态干净，防止第二次打开时通道无法重建 */
-//    MI_AO_DisableChn(AoDevId, AoChn);
-//    MI_AO_Disable(AoDevId);
-//    usleep(200 * 1000);
-
-
-    //set Ao Attr struct
     memset(&stSetAttr, 0, sizeof(MI_AUDIO_Attr_t));
     stSetAttr.eBitwidth = E_MI_AUDIO_BIT_WIDTH_16;
     stSetAttr.eWorkmode = E_MI_AUDIO_MODE_I2S_MASTER;
@@ -136,7 +119,7 @@ static int mm_audio_init(void *args)
 
     if (!g_opts.audio_layout) {
         if (is->p_audio_stream->codecpar->channel_layout == AV_CH_LAYOUT_STEREO) {
-            g_opts.audio_layout = AV_CH_LAYOUT_STEREO; // 如果不是立体声, 默认使用单声道
+            g_opts.audio_layout = AV_CH_LAYOUT_STEREO;
         } else {
             g_opts.audio_layout = AV_CH_LAYOUT_MONO;
         }
@@ -154,19 +137,11 @@ static int mm_audio_init(void *args)
         stSetAttr.u32ChnCnt = 1;
         stSetAttr.eSoundmode = E_MI_AUDIO_SOUND_MODE_MONO;
     }
-
     stSetAttr.eSamplerate = E_MI_AUDIO_SAMPLE_RATE_48000;
 
-    /* set ao public attr*/
     MI_AO_SetPubAttr(AoDevId, &stSetAttr);
-
-    /* get ao device*/
     MI_AO_GetPubAttr(AoDevId, &stGetAttr);
-
-    /* enable ao device */
     MI_AO_Enable(AoDevId);
-
-    /* enable ao channel of device*/
     MI_AO_EnableChn(AoDevId, AoChn);
 
 #ifdef CHIP_IS_SS268
@@ -178,47 +153,19 @@ static int mm_audio_init(void *args)
     MI_AO_SetVolume(AoDevId, AoChn, s32SetVolumeDb, E_MI_AO_GAIN_FADING_16_SAMPLE);
     MI_AO_GetVolume(AoDevId, AoChn, &s32GetVolumeDb);
 #else
-    /* if test AO Volume */
     s32SetVolumeDb = MIN_ADJUST_AO_VOLUME;
     MI_AO_SetVolume(AoDevId, s32SetVolumeDb);
-
-    /* get AO volume */
     MI_AO_GetVolume(AoDevId, &s32GetVolumeDb);
 #endif
     av_log(NULL, AV_LOG_INFO, "mm_audio_init dev[%d] done!\n", AoDevId);
-g_ao_inited = true;   // ← 加这行
+    g_ao_inited = true;
     return g_opts.audio_layout;
 }
 
 static int mm_audio_deinit(void *args)
 {
- //   MI_AUDIO_DEV AoDevId = g_opts.audio_dev;
- //   MI_AO_CHN AoChn = AUDIO_CHN;
-
-    //system("echo 0 > /sys/class/gpio/gpio12/value");
-
-  //  MI_AO_ClearChnBuf(AoDevId, AoChn);
-	
-    /* disable ao channel of */
-    //MI_AO_DisableChn(AoDevId, AoChn);
-
-    /* disable ao device */
-    //MI_AO_Disable(AoDevId);
-
     av_log(NULL, AV_LOG_INFO, "mm_audio_deinit: skip, keep AO on\n");
     return MI_SUCCESS;
-}
-
-int mm_player_reopen(const char *newfile)
-{
-    if (!g_mmplayer) {
-        av_log(NULL, AV_LOG_ERROR, "mm_player_reopen: player not open\n");
-        return -1;
-    }
-    pthread_mutex_lock(&player_mutex);
-    int ret = player_reopen(g_mmplayer, newfile);
-    pthread_mutex_unlock(&player_mutex);
-    return ret;
 }
 
 static int mm_audio_pause(void)
@@ -245,7 +192,6 @@ static int mm_audio_clear_buf(void)
     {
         av_log(NULL, AV_LOG_ERROR, "g_mmplayer is null!\n");
     }
-
     if (g_mmplayer->paused)
     {
         MI_AO_ResumeChn(g_opts.audio_dev, AUDIO_CHN);
@@ -264,7 +210,6 @@ static int mm_audio_play(void *args, char *data, int len)
     int data_idx = 0, data_len = len;
     char *audio_pcm = (char *)data;
     int audio_write_buf_size = 0;
-
     MI_AUDIO_Frame_t stAoSendFrame;
     MI_S32 s32RetSendStatus = 0;
     MI_AO_CHN AoChn = AUDIO_CHN;
@@ -272,7 +217,6 @@ static int mm_audio_play(void *args, char *data, int len)
 
     MI_AO_QueryChnStat(g_opts.audio_dev, AoChn, &stState);
     audio_write_buf_size = stState.u32ChnBusyNum + 1024;
-    //printf("remain audio_write_buf_size = %d\n", audio_write_buf_size);
 
     do {
         if (data_len <= MI_AUDIO_MAX_DATA_SIZE)
@@ -297,7 +241,6 @@ static int mm_audio_play(void *args, char *data, int len)
         }
         stAoSendFrame.apVirAddr[0] = &audio_pcm[data_idx];
         stAoSendFrame.apVirAddr[1] = NULL;
-
         data_len -= MI_AUDIO_MAX_DATA_SIZE;
         data_idx += MI_AUDIO_MAX_DATA_SIZE;
 
@@ -396,6 +339,54 @@ static void mm_video_rotate(gfx_param_t *gfx_info, MI_PHY yAddr, MI_PHY uvAddr)
     }
 }
 
+/* OSD 叠加，只覆盖 Y plane 底部 80 行 */
+static void mm_video_overlay_osd(gfx_param_t *gfx_info)
+{
+    MI_GFX_Surface_t stSrc, stDst;
+    MI_GFX_Rect_t    stSrcRect, stDstRect;
+    MI_GFX_Opt_t     stOpt;
+    MI_U16           u16Fence;
+    MI_S32           s32Ret;
+
+    if (!osd_is_visible()) return;
+    if (gfx_info->direction != AV_ROTATE_NONE) return;
+
+    memset(&stOpt, 0, sizeof(stOpt));
+    stOpt.eSrcDfbBldOp = E_MI_GFX_DFB_BLD_ONE;
+    stOpt.eDstDfbBldOp = E_MI_GFX_DFB_BLD_ZERO;
+    stOpt.eMirror      = E_MI_GFX_MIRROR_NONE;
+    stOpt.eRotate      = E_MI_GFX_ROTATE_0;
+
+    stSrc.phyAddr   = osd_get_phy_addr();
+    stSrc.eColorFmt = E_MI_GFX_FMT_I8;
+    stSrc.u32Width  = osd_get_width();
+    stSrc.u32Height = osd_get_bar_height();
+    stSrc.u32Stride = osd_get_stride();
+
+    stSrcRect.s32Xpos   = 0;
+    stSrcRect.s32Ypos   = 0;
+    stSrcRect.u32Width  = osd_get_width();
+    stSrcRect.u32Height = osd_get_bar_height();
+
+    stDst.phyAddr   = gfx_info->phy_addr[0];
+    stDst.eColorFmt = E_MI_GFX_FMT_I8;
+    stDst.u32Width  = gfx_info->src.w;
+    stDst.u32Height = gfx_info->src.h;
+    stDst.u32Stride = gfx_info->src.pitch;
+
+    stDstRect.s32Xpos   = 0;
+    stDstRect.s32Ypos   = gfx_info->src.h - osd_get_bar_height();
+    stDstRect.u32Width  = osd_get_width();
+    stDstRect.u32Height = osd_get_bar_height();
+
+    osd_lock();
+    s32Ret = MI_GFX_BitBlit(&stSrc, &stSrcRect, &stDst, &stDstRect,
+                            &stOpt, &u16Fence);
+    if (s32Ret == MI_SUCCESS)
+        MI_GFX_WaitAllDone(FALSE, u16Fence);
+    osd_unlock();
+}
+
 bool printf_flag = false;
 static int mm_video_play(void *args, void *data)
 {
@@ -417,21 +408,14 @@ static int mm_video_play(void *args, void *data)
         stInputChnPort.u32DevId   = SCL_DEV;
         stInputChnPort.u32PortId  = SCL_PORT;
 #endif
-        //gettimeofday(&time_start, NULL);
-        // YUV格式统一转换成NV12
-        sws_scale(is->img_convert_ctx,                  // sws context
-                  (const uint8_t *const *)frame->data,  // src slice
-                  frame->linesize,                      // src stride
-                  0,                                    // src slice y
-                  is->p_vcodec_ctx->height,             // src slice height
-                  is->p_frm_yuv->data,                  // dst planes
-                  is->p_frm_yuv->linesize               // dst strides
+        sws_scale(is->img_convert_ctx,
+                  (const uint8_t *const *)frame->data,
+                  frame->linesize,
+                  0,
+                  is->p_vcodec_ctx->height,
+                  is->p_frm_yuv->data,
+                  is->p_frm_yuv->linesize
                   );
-        //gettimeofday(&time_end, NULL);
-        //time0 = ((int64_t)time_end.tv_sec * 1000000 + time_end.tv_usec) - ((int64_t)time_start.tv_sec * 1000000 + time_start.tv_usec);
-
-        //int length = is->p_frm_yuv->width * is->p_frm_yuv->height * 3 / 2;
-        //fwrite(is->p_frm_yuv->data[0], length, 1, dump_fp);
 
         MI_SYS_BufConf_t stBufConf;
         MI_SYS_BufInfo_t stBufInfo;
@@ -452,7 +436,6 @@ static int mm_video_play(void *args, void *data)
 #endif
         if (MI_SUCCESS == MI_SYS_ChnInputPortGetBuf(&stInputChnPort, &stBufConf, &stBufInfo, &bufHandle, 0))
         {
-            // flush需要时间分辨率大于720P就不执行该操作但是会导致图像拉丝
             if (is->p_frm_yuv->width * is->p_frm_yuv->height < 1280 * 720 || is->flush) {
                 MI_SYS_FlushInvCache(is->vir_addr, is->buf_size);
             }
@@ -469,15 +452,12 @@ static int mm_video_play(void *args, void *data)
             gfx_info.dst.right  = is->p_vcodec_ctx->width;
             gfx_info.dst.bottom = is->p_vcodec_ctx->height;
 
-            //gettimeofday(&time_start, NULL);
+            mm_video_overlay_osd(&gfx_info);
+
             mm_video_rotate(&gfx_info, stBufInfo.stFrameData.phyAddr[0], stBufInfo.stFrameData.phyAddr[1]);
-            //gettimeofday(&time_end, NULL);
 
             MI_SYS_ChnInputPortPutBuf(bufHandle, &stBufInfo, FALSE);
         }
-
-        //time1 = ((int64_t)time_end.tv_sec * 1000000 + time_end.tv_usec) - ((int64_t)time_start.tv_sec * 1000000 + time_start.tv_usec);
-        //printf("time of sws_scale : %lldus, time of rotate : %lldus\n", time0, time1);
     }
     else if (is->decoder_type == AV_HARD_DECODING)
     {
@@ -508,16 +488,19 @@ static int mm_video_play(void *args, void *data)
         SS_Vdec_BufInfo *stVdecBuf = (SS_Vdec_BufInfo *)frame->opaque;
 
 #if ((defined CHIP_IS_SSD20X) || (defined CHIP_IS_SS22X))
-        if (is->display_mode == AV_ROTATE_NONE && !g_opts.enable_scaler && !is->keep_frames)
+        int injected = 0;
+        /* OSD 显示时强制走拷贝路径，才能叠加。其余情况走直通。 */
+        if (is->display_mode == AV_ROTATE_NONE && !g_opts.enable_scaler &&
+            !is->keep_frames && !osd_is_visible())
         {
             if (MI_SUCCESS == MI_SYS_ChnPortInjectBuf(stVdecBuf->stVdecHandle, &stInputChnPort)) {
                 stVdecBuf->stVdecHandle = NULL;
-                //av_log(NULL, AV_LOG_WARNING, "Inject Buf To Disp u32SequenceNumber: %u, eBufType: %d\n", stVdecBuf->stVdecBufInfo.u32SequenceNumber, stVdecBuf->stVdecBufInfo.eBufType);
+                injected = 1;
             } else {
                 av_log(NULL, AV_LOG_ERROR, "MI_SYS_ChnPortInjectBuf Failed!\n");
             }
         }
-        else
+        if (!injected)
 #endif
         {
             MI_SYS_BufConf_t stBufConf;
@@ -730,15 +713,14 @@ static int mm_video_play(void *args, void *data)
                     MI_SCL_SetInputPortCrop(SclDevId, SclChnId, &stCropWin);
                 }
 #endif
-                //gettimeofday(&time_start, NULL);
+                /* OSD 叠加，必须在 mm_video_rotate 之前 */
+                mm_video_overlay_osd(&gfx_info);
+
                 mm_video_rotate(&gfx_info, stBufInfo.stFrameData.phyAddr[0], stBufInfo.stFrameData.phyAddr[1]);
-                //gettimeofday(&time_end, NULL);
-                //time1 = ((int64_t)time_end.tv_sec * 1000000 + time_end.tv_usec) - ((int64_t)time_start.tv_sec * 1000000 + time_start.tv_usec);
-                //printf("time of mm_video_rotate : %lldus, time of rotate : %lldus\n", time0, time1);
+
                 MI_SYS_ChnInputPortPutBuf(bufHandle, &stBufInfo, FALSE);
             }
         }
-        //frame_queue_putbuf(frame);
     }
 
     return 0;
@@ -748,15 +730,12 @@ static int mm_video_putbuf(void *args)
 {
     AVFrame * frame = (AVFrame *)args;
     SS_Vdec_BufInfo *stVdecBuf = (SS_Vdec_BufInfo *)frame->opaque;
-    //printf("Vdec Put Buf u32SequenceNumber: %u, eBufType: %d\n", stVdecBuf->stVdecBufInfo.u32SequenceNumber, stVdecBuf->stVdecBufInfo.eBufType);
     if (stVdecBuf->stVdecHandle) {
         if (MI_SUCCESS != MI_SYS_ChnOutputPortPutBuf(stVdecBuf->stVdecHandle)) {
             printf("frame_queue_putbuf failed!\n");
         }
-        //av_log(NULL, AV_LOG_ERROR, "Vdec Put Buf u32SequenceNumber: %u, eBufType: %d\n", stVdecBuf->stVdecBufInfo.u32SequenceNumber, stVdecBuf->stVdecBufInfo.eBufType);
     }
     av_freep(&frame->opaque);
-
     return 0;
 }
 
@@ -1198,12 +1177,9 @@ int mm_player_close(void)
     }
 
     pthread_mutex_lock(&player_mutex);
-
     ret = player_deinit(g_mmplayer);
-
     g_mmplayer = NULL;
     audio_mute = false;
-
     pthread_mutex_unlock(&player_mutex);
     pthread_mutex_destroy(&player_mutex);
 
@@ -1215,59 +1191,48 @@ int mm_player_close(void)
 int mm_player_pause(void)
 {
     pthread_mutex_lock(&player_mutex);
-
     if (!g_mmplayer || g_mmplayer->paused) {
         av_log(NULL, AV_LOG_ERROR, "mm_player_pause failed\n");
         pthread_mutex_unlock(&player_mutex);
         return -1;
     }
-
     av_log(NULL, AV_LOG_INFO, "mm_player_pause!\n");
     toggle_pause(g_mmplayer);
     g_mmplayer->play_status |= AV_PLAY_PAUSE;
-
     pthread_mutex_unlock(&player_mutex);
-
     return 0;
 }
 
 int mm_player_resume(void)
 {
     pthread_mutex_lock(&player_mutex);
-
     if (!g_mmplayer || !g_mmplayer->paused) {
         av_log(NULL, AV_LOG_ERROR, "mm_player_resume failed\n");
         pthread_mutex_unlock(&player_mutex);
         return -1;
     }
-
     av_log(NULL, AV_LOG_INFO, "mm_player_resume!\n");
     toggle_pause(g_mmplayer);
     g_mmplayer->play_status &= ~AV_PLAY_PAUSE;
-
     pthread_mutex_unlock(&player_mutex);
-
     return 0;
 }
 
 int mm_player_getposition(double *position)
 {
     pthread_mutex_lock(&player_mutex);
-
     if (!g_mmplayer) {
         av_log(NULL, AV_LOG_ERROR, "mm_player_getposition failed\n");
         *position = NAN;
         pthread_mutex_unlock(&player_mutex);
         return -1;
     }
-
     *position = NAN;
     if (g_mmplayer->video_idx >= 0) {
         *position = g_mmplayer->video_clk.pts;
     } else {
         *position = g_mmplayer->audio_clk.pts;
     }
-
     if (isnan(*position)) {
         pthread_mutex_unlock(&player_mutex);
         return -1;
@@ -1276,21 +1241,18 @@ int mm_player_getposition(double *position)
         *position = (isnan(start_time)) ? *position : (*position - start_time);
     }
     pthread_mutex_unlock(&player_mutex);
-
     return 0;
 }
 
 int mm_player_getduration(double *duration)
 {
     pthread_mutex_lock(&player_mutex);
-
     if (!g_mmplayer) {
         av_log(NULL, AV_LOG_ERROR, "mm_player_getduration failed\n");
         *duration = NAN;
         pthread_mutex_unlock(&player_mutex);
         return -1;
     }
-
     if (g_mmplayer->p_fmt_ctx->duration != AV_NOPTS_VALUE) {
         *duration = g_mmplayer->p_fmt_ctx->duration * av_q2d(AV_TIME_BASE_Q);
         av_log(NULL, AV_LOG_INFO, "get file duration time [%.3lf]\n", *duration);
@@ -1298,30 +1260,24 @@ int mm_player_getduration(double *duration)
         av_log(NULL, AV_LOG_WARNING, "get invalid duration time\n");
         *duration = NAN;
     }
-
     pthread_mutex_unlock(&player_mutex);
-
     return 0;
 }
 
 int mm_player_seek(double time)
 {
     double pos = 0.0f;
-
     pthread_mutex_lock(&player_mutex);
-
     if (!g_mmplayer) {
         av_log(NULL, AV_LOG_ERROR, "mm_player_seek failed\n");
         pthread_mutex_unlock(&player_mutex);
         return -1;
     }
-
     if (g_mmplayer->seek_by_bytes) {
         av_log(NULL, AV_LOG_WARNING, "this file don't support to seek!\n");
         pthread_mutex_unlock(&player_mutex);
         return -1;
     }
-
     pos = get_master_clock(g_mmplayer);
     if (isnan(pos))
         pos = (double)g_mmplayer->seek_pos / AV_TIME_BASE;
@@ -1334,30 +1290,24 @@ int mm_player_seek(double time)
     stream_seek(g_mmplayer, (int64_t)(pos * AV_TIME_BASE), (int64_t)(time * AV_TIME_BASE), g_mmplayer->seek_by_bytes);
     g_mmplayer->start_play = false;
     gettimeofday(&g_mmplayer->tim_open, NULL);
-
     pthread_mutex_unlock(&player_mutex);
-
     return 0;
 }
 
 int mm_player_seek2time(double time)
 {
     double pos = 0.0f, diff = 0.0f, target = 0.0f;
-
     pthread_mutex_lock(&player_mutex);
-
     if (!g_mmplayer) {
         av_log(NULL, AV_LOG_ERROR, "mm_player_seek2time failed\n");
         pthread_mutex_unlock(&player_mutex);
         return -1;
     }
-
     if (g_mmplayer->seek_by_bytes) {
         av_log(NULL, AV_LOG_WARNING, "this file don't support to seek!\n");
         pthread_mutex_unlock(&player_mutex);
         return -1;
     }
-
     pos = get_master_clock(g_mmplayer);
     if (isnan(pos))
     {
@@ -1373,28 +1323,20 @@ int mm_player_seek2time(double time)
     stream_seek(g_mmplayer, (int64_t)(target * AV_TIME_BASE), (int64_t)(diff * AV_TIME_BASE), g_mmplayer->seek_by_bytes);
     g_mmplayer->start_play = false;
     gettimeofday(&g_mmplayer->tim_open, NULL);
-
     pthread_mutex_unlock(&player_mutex);
-
     return 0;
 }
 
+/* 音量不锁 player_mutex，AO 接口本身异步 */
 int mm_player_set_volumn(int volumn)
 {
+    MI_S32 vol;
     if (!g_mmplayer) {
         av_log(NULL, AV_LOG_INFO, "mm_player_set_volumn failed!\n");
         return -1;
     }
-
     if (g_mmplayer->audio_idx >= 0) {
-        MI_S32 vol;
-        MI_AO_ChnState_t stAoState;
-        MI_AO_CHN AoChn = AUDIO_CHN;
-
         if (volumn > 0) {
-            //vol = volumn * (MAX_ADJUST_AO_VOLUME - MIN_ADJUST_AO_VOLUME) / 100 + MIN_ADJUST_AO_VOLUME;
-            //vol = (vol > MAX_ADJUST_AO_VOLUME) ? MAX_ADJUST_AO_VOLUME : vol;
-            //vol = (vol < MIN_ADJUST_AO_VOLUME) ? MIN_ADJUST_AO_VOLUME : vol;
             vol = (int)(log10(volumn * 1.0) * 45 - 60);
             vol = (vol > 30) ? 30 : vol;
             audio_mute = false;
@@ -1402,23 +1344,17 @@ int mm_player_set_volumn(int volumn)
             vol = MIN_AO_VOLUME;
             audio_mute = true;
         }
-
-        memset(&stAoState, 0, sizeof(MI_AO_ChnState_t));
-        if (MI_SUCCESS == MI_AO_QueryChnStat(g_opts.audio_dev, AUDIO_CHN, &stAoState))
-        {
 #ifdef CHIP_IS_SS268
-            MI_AO_SetVolume(g_opts.audio_dev, AoChn, vol, E_MI_AO_GAIN_FADING_16_SAMPLE);
-            MI_AO_SetMute(g_opts.audio_dev, AoChn, audio_mute);
+        MI_AO_SetVolume(g_opts.audio_dev, AUDIO_CHN, vol, E_MI_AO_GAIN_FADING_16_SAMPLE);
+        MI_AO_SetMute(g_opts.audio_dev, AUDIO_CHN, audio_mute);
 #elif defined CHIP_IS_SS22X
-            MI_AO_SetVolume(g_opts.audio_dev, AoChn, vol, E_MI_AO_GAIN_FADING_16_SAMPLE);
-            MI_AO_SetMute(g_opts.audio_dev, AoChn, audio_mute);
+        MI_AO_SetVolume(g_opts.audio_dev, AUDIO_CHN, vol, E_MI_AO_GAIN_FADING_16_SAMPLE);
+        MI_AO_SetMute(g_opts.audio_dev, AUDIO_CHN, audio_mute);
 #else
-            MI_AO_SetVolume(g_opts.audio_dev, vol);
-            MI_AO_SetMute(g_opts.audio_dev, audio_mute);
+        MI_AO_SetVolume(g_opts.audio_dev, vol);
+        MI_AO_SetMute(g_opts.audio_dev, audio_mute);
 #endif
-        }
     }
-
     return 0;
 }
 
@@ -1428,15 +1364,12 @@ int mm_player_set_mute(bool mute)
         av_log(NULL, AV_LOG_ERROR, "mm_player_set_mute failed!\n");
         return -1;
     }
-
     if (g_mmplayer->audio_idx >= 0) {
         audio_mute = mute;
 #ifdef CHIP_IS_SS268
-        MI_AO_CHN AoChn = AUDIO_CHN;
-        MI_AO_SetMute(g_opts.audio_dev, AoChn, audio_mute);
+        MI_AO_SetMute(g_opts.audio_dev, AUDIO_CHN, audio_mute);
 #elif defined CHIP_IS_SS22X
-        MI_AO_CHN AoChn = AUDIO_CHN;
-        MI_AO_SetMute(g_opts.audio_dev, AoChn, audio_mute);
+        MI_AO_SetMute(g_opts.audio_dev, AUDIO_CHN, audio_mute);
 #else
         MI_AO_SetMute(g_opts.audio_dev, audio_mute);
 #endif
@@ -1445,7 +1378,6 @@ int mm_player_set_mute(bool mute)
         else
             g_mmplayer->play_status &= ~AV_AUDIO_MUTE;
     }
-
     return 0;
 }
 
@@ -1467,7 +1399,6 @@ int mm_player_set_window(int x, int y, int width, int height)
 
 #if (defined CHIP_IS_SSD20X || defined CHIP_IS_SS22X)
         MI_DIVP_OutputPortAttr_t stOutputPortAttr;
-
         MI_DIVP_GetOutputPortAttr(0, &stOutputPortAttr);
         stOutputPortAttr.u32Width  = g_mmplayer->src_width;
         stOutputPortAttr.u32Height = g_mmplayer->src_height;
@@ -1477,7 +1408,6 @@ int mm_player_set_window(int x, int y, int width, int height)
         MI_SCL_PORT SclOutPortId = SCL_PORT;
         MI_SCL_CHANNEL SclChnId = SCL_CHN;
         MI_SCL_OutPortParam_t stSclOutputParam;
-
         memset(&stSclOutputParam, 0x0, sizeof(MI_SCL_OutPortParam_t));
         stSclOutputParam.stSCLOutCropRect.u16X      = 0;
         stSclOutputParam.stSCLOutCropRect.u16Y      = 0;
@@ -1489,7 +1419,6 @@ int mm_player_set_window(int x, int y, int width, int height)
         stSclOutputParam.ePixelFormat  = E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420;
         stSclOutputParam.bMirror       = FALSE;
         stSclOutputParam.bFlip         = FALSE;
-
         MI_SCL_SetOutputPortParam(SclDevId, SclChnId, SclOutPortId, &stSclOutputParam);
 #endif
 
@@ -1508,9 +1437,7 @@ int mm_player_set_window(int x, int y, int width, int height)
         av_log(NULL, AV_LOG_INFO, "cannot set windows when disable scaler!\n");
         return -1;
     }
-
     av_log(NULL, AV_LOG_INFO, "mm_player_set_window =  [%d %d %d %d]\n", x, y, width, height);
-
     return 0;
 }
 
@@ -1519,89 +1446,68 @@ int mm_player_set_opts(const char *key, const char *value, int flags)
     if (!strcmp(key, "audio_only")) {
         g_opts.audio_only = flags;
         av_log(NULL, AV_LOG_INFO, "mmplayer audio_only = %d\n", g_opts.audio_only);
-
         return 0;
     }
-
     if (!strcmp(key, "video_only")) {
         g_opts.video_only = flags;
         av_log(NULL, AV_LOG_INFO, "mmplayer video_only = %d\n", g_opts.video_only);
-
         return 0;
     }
-
     if (!strcmp(key, "video_rotate")) {
         g_opts.video_rotate = flags;
         av_log(NULL, AV_LOG_INFO, "mmplayer video_rotate = %d\n", g_opts.video_rotate);
-
         if (g_opts.video_rotate > AV_ROTATE_270 || g_opts.video_rotate < AV_ROTATE_NONE)
         {
             av_log(NULL, AV_LOG_ERROR, "video rotate parameter error!\n");
             g_opts.video_rotate = AV_ROTATE_NONE;
             return -1;
         }
-
         return 0;
     }
-
     if (!strcmp(key, "video_ratio")) {
         g_opts.video_ratio = flags;
         av_log(NULL, AV_LOG_INFO, "mmplayer video_ratio = %d\n", g_opts.video_ratio);
-
         if (g_opts.video_ratio > AV_SAR_16_9_MODE || g_opts.video_ratio < AV_ORIGIN_MODE)
         {
             av_log(NULL, AV_LOG_ERROR, "video ratio parameter error!\n");
             g_opts.video_ratio = AV_SCREEN_MODE;
             return -1;
         }
-
         return 0;
     }
-
     if (!strcmp(key, "audio_device")) {
         g_opts.audio_dev = flags;
         av_log(NULL, AV_LOG_INFO, "mmplayer audio_dev = %d\n", g_opts.audio_dev);
-
         if (g_opts.audio_dev > 4 || g_opts.audio_dev < 0)
         {
             av_log(NULL, AV_LOG_ERROR, "video audio device error!\n");
             g_opts.audio_dev = AUDIO_DEV;
             return -1;
         }
-
         return 0;
     }
-
     if (!strcmp(key, "audio_layout")) {
         g_opts.audio_layout = flags;
         av_log(NULL, AV_LOG_INFO, "mmplayer audio_layout = %d\n", g_opts.audio_layout);
-
         return 0;
     }
-
     if (!strcmp(key, "resolution") && value) {
         memset(g_opts.resolution, '\0', sizeof(g_opts.resolution));
         memcpy(g_opts.resolution, value, strlen(value));
         int resolution = atoi(g_opts.resolution);
         av_log(NULL, AV_LOG_INFO, "mmplayer resolution = %d\n", resolution);
-
         return 0;
     }
-
     if (!strcmp(key, "enable_scaler")) {
         g_opts.enable_scaler = flags;
         av_log(NULL, AV_LOG_INFO, "mmplayer enable_scaler = %d\n", g_opts.enable_scaler);
-
         return 0;
     }
-
     if (!strcmp(key, "play_mode")) {
         g_opts.play_mode = flags;
         av_log(NULL, AV_LOG_INFO, "mmplayer play_mode = %d\n", g_opts.play_mode);
-
         return 0;
     }
-
     av_log(NULL, AV_LOG_ERROR, "unknowed key words: %s!\n", key);
     return -1;
 }
@@ -1612,7 +1518,6 @@ int mm_player_get_status(void)
         av_log(NULL, AV_LOG_ERROR, "mm_player_get_status failed!\n");
         return -1;
     }
-
     return g_mmplayer->play_status;
 }
 
@@ -1632,6 +1537,5 @@ int mm_player_flush_screen(bool enable)
             MI_DISP_DisableInputPort(DISP_LAYER, DISP_INPUTPORT);
         }
     }
-
     return 0;
 }
